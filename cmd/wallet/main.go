@@ -15,6 +15,7 @@ import (
 	"github.com/vaxxnsh/payment-microservices/internal/platform/httpx"
 	"github.com/vaxxnsh/payment-microservices/internal/platform/logging"
 	"github.com/vaxxnsh/payment-microservices/internal/platform/postgres"
+	"github.com/vaxxnsh/payment-microservices/internal/wallet"
 )
 
 // version is stamped at build time: go build -ldflags "-X main.version=v1.2.3".
@@ -66,6 +67,8 @@ func main() {
 		httpx.WriteJSON(w, r, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
+	svc := wallet.NewService(wallet.NewStore(pool))
+	wallet.NewHandler(svc).Register(mux)
 	mux.HandleFunc("/", httpx.NotFound)
 
 	srv := &http.Server{
