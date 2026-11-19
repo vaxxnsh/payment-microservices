@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/vaxxnsh/payment-microservices/internal/platform/apperr"
 	"github.com/vaxxnsh/payment-microservices/internal/wallet/walletdb"
 )
 
@@ -26,7 +27,7 @@ const (
 )
 
 // ErrAccountNotFound is returned when an account does not exist. It wraps
-var ErrAccountNotFound = errors.New("account not found")
+var ErrAccountNotFound = fmt.Errorf("account %w", apperr.ErrNotFound)
 
 // Store is the wallet's data access layer, often called a repository. It wraps
 // the sqlc queries, and owns database transactions.

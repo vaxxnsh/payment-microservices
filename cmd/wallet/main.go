@@ -11,18 +11,39 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vaxxnsh/payment-microservices/internal/platform/config"
+	"github.com/vaxxnsh/payment-microservices/internal/platform/httpx"
+	"github.com/vaxxnsh/payment-microservices/internal/platform/logging"
 	"github.com/vaxxnsh/payment-microservices/internal/platform/postgres"
 )
 
+// version is stamped at build time: go build -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	cfg, err := loadConfig(config.New(os.LookupEnv))
+	if err != nil {
+		// There's no logger yet: its settings are part of the configuration.
+		fmt.Fprintln(os.Stderr, "wallet:", err)
+		os.Exit(2)
+	}
+	logger := logging.New(os.Stdout, logging.Options{
+		Service: "wallet",
+		Version: version,
+		Level:   cfg.LogLevel,
+		Format:  cfg.LogFormat,
+	})
+
+	// Code that logs through the slog package functions gets our logger too.
+	slog.SetDefault(logger)
+	logger.Info("starting", "env", cfg.Env, "log_level", cfg.LogLevel.String())
 
 	dsn := os.Getenv("WALLET_DATABASE_URL")
 	if dsn == "" {
 		// Local development default: the wallet database in Docker Compose.
 		dsn = "postgres://payments:payments@localhost:5432/wallet?sslmode=disable"
 	}
-	pool, err := postgres.NewPool(context.Background(), dsn)
+	pool, err := postgres.NewPool(context.Background(), cfg.DatabaseURL, int32(cfg.DBMaxConns))
 	if err != nil {
 		logger.Error("connect to postgres", "err", err)
 		os.Exit(1)
@@ -31,31 +52,36 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("health check", "remote", r.RemoteAddr)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}` + "\n"))
+		httpx.WriteJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		w.Header().Set("Content-Type", "application/json")
 		if err := pool.Ping(ctx); err != nil {
-			logger.Warn("not ready: database unreachable", "err", err)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"unavailable"}` + "\n"))
+			logger.WarnContext(ctx, "not ready: database unreachable", "err", err)
+			httpx.WriteJSON(w, r, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 			return
 		}
-		w.Write([]byte(`{"status":"ready"}` + "\n"))
+		httpx.WriteJSON(w, r, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
+	mux.HandleFunc("/", httpx.NotFound)
+
 	srv := &http.Server{
-		Addr:              ":8081",
-		Handler:           mux,
+		Addr: cfg.HTTPAddr,
+		Handler: httpx.Chain(mux,
+			httpx.RequestID,
+			httpx.AccessLog(logger),
+			httpx.Recover(logger),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
 	go func() {
 		logger.Info("wallet service listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -64,16 +90,18 @@ func main() {
 	}()
 
 	<-ctx.Done()
+
 	fmt.Println()
 	logger.Info("shutting down gracefully")
+
 	shutdonwnCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdonwnCtx); err != nil {
 		logger.Error("shutdown failed", "err", err)
 	}
+
 	logger.Info("server stopped")
 	pool.Close()
 	logger.Info("database pool closed")
-
 }
