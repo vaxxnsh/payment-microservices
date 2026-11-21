@@ -30,6 +30,12 @@ func writeBody(w http.ResponseWriter, status int, body []byte) {
 	w.Write(append(body, '\n'))
 }
 
+// NewError returns an error that Error sends with exactly this status and
+// code. It's for problems with the request itself, like a missing header.
+func NewError(status int, code, msg string) error {
+	return &requestError{status, code, msg}
+}
+
 // DecodeJSON reads the request body into dst. It is strict on purpose: one
 // JSON value, at most 1 MiB, and no fields that dst doesn't have. Problems
 // come back as errors that Error turns into a 400 or a 413.

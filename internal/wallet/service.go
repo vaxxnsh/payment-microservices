@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/vaxxnsh/payment-microservices/internal/platform/apperr"
 )
 
@@ -45,6 +46,12 @@ type Service struct {
 // NewService returns a Service that keeps its data in store.
 func NewService(store *Store) *Service {
 	return &Service{store: store}
+}
+
+// WithTx returns a Service that does all its work inside tx, the caller's
+// database transaction. See Store.WithTx.
+func (s *Service) WithTx(tx pgx.Tx) *Service {
+	return &Service{store: s.store.WithTx(tx)}
 }
 
 // CreateWallet opens a wallet for an owner, in one currency. An owner can

@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/vaxxnsh/payment-microservices/internal/platform/httpx"
+	"github.com/vaxxnsh/payment-microservices/internal/platform/idempotency"
 )
 
 // The API's JSON shapes. They're separate from the database models on
@@ -55,12 +57,14 @@ func toWallet(a Account) walletResponse {
 // Handler serves the wallet API over HTTP. It only translates: JSON and URLs
 // in, calls to the Service, JSON out. The rules live in the Service.
 type Handler struct {
-	svc *Service
+	svc  *Service
+	keys *idempotency.Store
 }
 
-// NewHandler returns a Handler that serves svc.
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+// NewHandler returns a Handler that serves svc. Requests that move money run
+// once per idempotency key, and keys keeps those.
+func NewHandler(svc *Service, keys *idempotency.Store) *Handler {
+	return &Handler{svc: svc, keys: keys}
 }
 
 // Register adds the wallet API's routes to mux.
@@ -73,12 +77,43 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST /v1/transfers", httpx.HandlerFunc(h.transfer))
 }
 
+// walletID reads the wallet ID from the URL. An ID that isn't a UUID can't
+// name a wallet, so it's a 404, just like an unknown one.
 func walletID(r *http.Request) (uuid.UUID, error) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		return uuid.Nil, ErrWalletNotFound
 	}
 	return id, nil
+}
+
+// caller names who sent a request. Clients choose their idempotency keys, so a
+// key is only unique per caller. Until we authenticate callers, every request
+// comes from the same one.
+func caller(*http.Request) string {
+	return "anonymous"
+}
+
+// idempotent runs a request that moves money once per idempotency key. req is
+// the decoded request body, for the key's fingerprint. do runs inside the
+// database transaction that completes the key, with a Service bound to it, so
+// the money moves and the key completes together, or not at all.
+func (h *Handler) idempotent(
+	w http.ResponseWriter, r *http.Request, req any,
+	do func(svc *Service) (idempotency.Response, error),
+) error {
+	key, err := idempotency.NewKey(r, caller(r), req)
+	if err != nil {
+		return err
+	}
+	resp, err := h.keys.Run(r.Context(), key, func(tx pgx.Tx) (idempotency.Response, error) {
+		return do(h.svc.WithTx(tx))
+	})
+	if err != nil {
+		return err
+	}
+	resp.Write(w)
+	return nil
 }
 
 func (h *Handler) createWallet(w http.ResponseWriter, r *http.Request) error {
@@ -159,19 +194,20 @@ func (h *Handler) transfer(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		return err
 	}
-	amount := Money{Amount: req.Amount, Currency: req.Currency}
-	tr, err := h.svc.Transfer(r.Context(), req.From, req.To, amount)
-	if err != nil {
-		return err
-	}
-	httpx.WriteJSON(w, r, http.StatusCreated, transferResponse{
-		TransactionID: tr.TransactionID,
-		From:          tr.From,
-		To:            tr.To,
-		Amount:        tr.Amount,
-		CreatedAt:     tr.CreatedAt,
+	return h.idempotent(w, r, req, func(svc *Service) (idempotency.Response, error) {
+		amount := Money{Amount: req.Amount, Currency: req.Currency}
+		tr, err := svc.Transfer(r.Context(), req.From, req.To, amount)
+		if err != nil {
+			return idempotency.Response{}, err
+		}
+		return idempotency.JSON(http.StatusCreated, transferResponse{
+			TransactionID: tr.TransactionID,
+			From:          tr.From,
+			To:            tr.To,
+			Amount:        tr.Amount,
+			CreatedAt:     tr.CreatedAt,
+		})
 	})
-	return nil
 }
 
 func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) error {
