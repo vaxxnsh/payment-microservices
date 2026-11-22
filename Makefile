@@ -50,3 +50,17 @@ VERSION ?= $(shell git describe --always --dirty)
 run-wallet:
 	@go build -ldflags "-X main.version=$(VERSION)" -o bin/wallet ./cmd/wallet
 	@WALLET_DATABASE_URL="$(DB_URL)" ./bin/wallet
+
+run-auth:
+	@go build -ldflags "-X main.version=$(VERSION)" -o bin/auth ./cmd/auth
+	@AUTH_DATABASE_URL="postgres://payments:payments@localhost:5432/auth?sslmode=disable" \
+		AUTH_PRIVATE_KEY_FILE=secrets/auth_ed25519.pem ./bin/auth
+
+# A new Ed25519 key pair for signing access tokens, readable only by you. The
+# auth service gets the private key, every other service the public one.
+keys:
+	@mkdir -p secrets
+	@test ! -e secrets/auth_ed25519.pem || (echo "secrets/auth_ed25519.pem exists, keeping it" && exit 1)
+	@umask 077 && openssl genpkey -algorithm ed25519 -out secrets/auth_ed25519.pem
+	@openssl pkey -in secrets/auth_ed25519.pem -pubout -out secrets/auth_ed25519.pub.pem
+	@ls -l secrets

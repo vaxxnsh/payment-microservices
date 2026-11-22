@@ -1,1 +1,5 @@
 bin/
+vendor/
+
+# Private keys and other secrets: never in git.
+secrets/
